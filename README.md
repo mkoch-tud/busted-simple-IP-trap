@@ -61,8 +61,10 @@ By default, all application data is persistently stored in the host's
 - `nonces.json`: activated nonces, activation times, and hit counts.
 - `.processor.offset`: the processor's restart position.
 
-Set `LOGFILES_DIR` in `.env` to mount a different host directory. Set `PUID` and
-`PGID` if the default `1000:1000` user cannot write to it.
+Set `LOGFILES_DIR` in `.env` to mount a different host directory. The Python
+containers run as container root so they can write to bind mounts regardless of
+the host account's numeric UID; they have no privileged mode or host filesystem
+access beyond this directory.
 
 The `log-processor` container converts raw entries into
 `./logfiles/processed_visitors.jsonl`. Each line is an independent JSON object:

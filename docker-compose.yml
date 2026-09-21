@@ -6,7 +6,6 @@ services:
     build:
       context: .
     restart: unless-stopped
-    user: "${PUID:-1000}:${PGID:-1000}"
     volumes:
       - type: bind
         source: "${LOGFILES_DIR:-./logfiles}"
@@ -27,8 +26,8 @@ services:
 
   log-processor:
     image: busted-simple-ip-trap-app:local
+    pull_policy: never
     restart: unless-stopped
-    user: "${PUID:-1000}:${PGID:-1000}"
     command: ["python", "log_processor.py"]
     volumes:
       - type: bind

@@ -4,11 +4,7 @@ WORKDIR /app
 
 COPY server.py log_processor.py index.html ./
 
-RUN addgroup -S trap && adduser -S -G trap trap \
-    && mkdir -p /data \
-    && chown trap:trap /data
-
-USER trap
+RUN mkdir -p /data
 
 EXPOSE 8000
 
