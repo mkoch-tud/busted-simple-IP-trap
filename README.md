@@ -133,6 +133,12 @@ Choose a different number with `-n`:
 ./visitor-report -n 25
 ```
 
+Aggregate all requests by country instead of IP address:
+
+```sh
+./visitor-report --country
+```
+
 The report contains:
 
 - Total hits per IP address.
@@ -155,13 +161,30 @@ The nonce report defaults to three IPs per nonce. Override it in the same way:
 ./visitor-report --require-nonce -n 5
 ```
 
+Report only one exact nonce:
+
+```sh
+./visitor-report --nonce 2347865gbkewfhbdkj
+```
+
+Options can be combined. For example, show the top five countries for one
+nonce:
+
+```sh
+./visitor-report --nonce 2347865gbkewfhbdkj --country -n 5
+```
+
+Use `--require-nonce --country` to show a separate country ranking for every
+activated nonce.
+
 Each nonce section includes its activation time, total registered hit count,
 and the selected connecting IPs with the same geolocation and organization
 columns. Activated nonces with no visits are also shown.
 
 All rankings are ordered by request count from highest to lowest, then
-lexicographically by IP address when counts are equal. This makes repeated
-reports stable.
+lexicographically by IP address or country when counts are equal. This makes
+repeated reports stable. Visits without IPinfo country data are grouped under
+`UNKNOWN`.
 
 ### Persistent files and raw logs
 
