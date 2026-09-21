@@ -2,7 +2,7 @@ FROM python:3.12-alpine
 
 WORKDIR /app
 
-COPY server.py log_processor.py index.html ./
+COPY server.py log_processor.py visitor_report.py index.html ./
 
 RUN mkdir -p /data
 

@@ -88,6 +88,7 @@ By default, all application data is persistently stored in the host's
 - `visitors.log`: raw page visits.
 - `processed_visitors.jsonl`: normalized visits.
 - `nonces.json`: activated nonces, activation times, and hit counts.
+- `ipinfo_cache.json`: cached IPinfo responses when enrichment is enabled.
 - `.processor.offset`: the processor's restart position.
 
 Set `LOGFILES_DIR` in `.env` to mount a different host directory. The Python
@@ -113,6 +114,64 @@ The processor stores its last-read position in `/data/.processor.offset`, so
 restarting the container does not normally duplicate previously processed
 entries. Existing log lines from older versions that have no identifier are
 also emitted with `"nonce": null`.
+
+### Optional IPinfo enrichment
+
+Set an IPinfo token in `.env` to enable enrichment:
+
+```env
+IPINFO_TOKEN=your-token
+```
+
+The processor then adds `country`, `city`, `postal`, `org`, and `timezone` to
+new processed records and caches successful lookups by IP in
+`./logfiles/ipinfo_cache.json`:
+
+```json
+{"timestamp":"2026-09-21 13:53:46,105","ip":"45.83.64.1","nonce":"2347865gbkewfhbdkj","country":"DE","city":"Berlin","postal":"10119","org":"AS208843 Alpha Strike Labs GmbH","timezone":"Europe/Berlin"}
+```
+
+The default endpoint matches the `ipinfo.io/<IP>` response shape. IPinfo's
+[official Lite endpoint](https://ipinfo.io/developers/lite-api) can be selected
+instead:
+
+```env
+IPINFO_API_URL=https://api.ipinfo.io/lite/{ip}
+```
+
+Lite provides country and ASN/organization data but does not provide city,
+postal code, or timezone, so those fields will be `null`. Lookups are disabled
+entirely when `IPINFO_TOKEN` is empty. Failed lookups do not interrupt log
+processing and are retried after the processor restarts. Enabling this feature
+sends visitor IP addresses to IPinfo; account for that in your privacy policy.
+
+Cache entries expire after 24 hours (`IPINFO_CACHE_TTL=86400`) and are pruned
+periodically. A later visit from that IP triggers a new lookup, so reassigned IP
+addresses do not retain old organization or geolocation data indefinitely.
+
+Restart the processor after changing these settings:
+
+```sh
+docker compose up -d --build --force-recreate log-processor
+```
+
+### Visitor reports
+
+Show the ten most frequently connected IPs across all page hits, regardless of
+whether they used a nonce:
+
+```sh
+./visitor-report
+```
+
+Show the top three IPs separately for every activated nonce:
+
+```sh
+./visitor-report --require-nonce
+```
+
+Both reports include cached country, city, postal code, timezone, and
+organization details when present in the processed records.
 
 ## Activate and track a nonce
 

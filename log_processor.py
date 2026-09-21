@@ -10,7 +10,11 @@ import json
 import os
 import secrets
 import string
+import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,7 +34,17 @@ DEFAULT_NONCE_LOCK_FILE = Path(
 )
 DEFAULT_POLL_INTERVAL = float(os.environ.get("PROCESSOR_POLL_INTERVAL", "1"))
 DEFAULT_NONCE_LENGTH = int(os.environ.get("NONCE_LENGTH", "24"))
+DEFAULT_IPINFO_TOKEN = os.environ.get("IPINFO_TOKEN", "")
+DEFAULT_IPINFO_API_URL = os.environ.get(
+    "IPINFO_API_URL", "https://ipinfo.io/{ip}/json"
+)
+DEFAULT_IPINFO_CACHE_FILE = Path(
+    os.environ.get("IPINFO_CACHE_FILE", "/data/ipinfo_cache.json")
+)
+DEFAULT_IPINFO_TIMEOUT = float(os.environ.get("IPINFO_TIMEOUT", "5"))
+DEFAULT_IPINFO_CACHE_TTL = float(os.environ.get("IPINFO_CACHE_TTL", "86400"))
 NONCE_ALPHABET = string.ascii_letters + string.digits
+IPINFO_FIELDS = ("country", "city", "postal", "org", "timezone")
 
 
 def parse_log_line(line: str) -> dict[str, Any] | None:
@@ -83,6 +97,165 @@ def append_record(output_file: Path, record: dict[str, Any]) -> None:
         json.dump(record, stream, ensure_ascii=True, separators=(",", ":"))
         stream.write("\n")
         stream.flush()
+
+
+def load_ipinfo_cache(cache_file: Path) -> dict[str, dict[str, Any]]:
+    try:
+        content = cache_file.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+
+    try:
+        cache = json.loads(content)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"Invalid IPinfo cache {cache_file}: {error}") from error
+    if not isinstance(cache, dict):
+        raise RuntimeError(f"Invalid IPinfo cache {cache_file}: expected an object")
+    return cache
+
+
+def save_ipinfo_cache(cache_file: Path, cache: dict[str, dict[str, Any]]) -> None:
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    temporary_file = cache_file.with_suffix(cache_file.suffix + ".new")
+    temporary_file.write_text(
+        json.dumps(cache, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary_file.replace(cache_file)
+
+
+def normalized_ipinfo(data: dict[str, Any]) -> dict[str, str | None]:
+    def text(field: str) -> str | None:
+        value = data.get(field)
+        return value if isinstance(value, str) and value else None
+
+    organization = text("org")
+    if organization is None:
+        organization = " ".join(
+            value
+            for value in (text("asn"), text("as_name"))
+            if value is not None
+        ) or None
+
+    return {
+        "country": text("country") or text("country_code"),
+        "city": text("city"),
+        "postal": text("postal"),
+        "org": organization,
+        "timezone": text("timezone"),
+    }
+
+
+class IPinfoEnricher:
+    def __init__(
+        self,
+        token: str,
+        api_url: str,
+        cache_file: Path,
+        timeout: float,
+        cache_ttl: float,
+    ) -> None:
+        self.token = token
+        self.api_url = api_url
+        self.cache_file = cache_file
+        self.timeout = timeout
+        self.cache_ttl = cache_ttl
+        self.cache = load_ipinfo_cache(cache_file)
+        self.failed_ips: set[str] = set()
+        self.next_prune_at = 0.0
+        self.prune_expired(force=True)
+
+    def cache_entry_is_fresh(self, entry: dict[str, Any]) -> bool:
+        cached_at = entry.get("cached_at")
+        if not isinstance(cached_at, str):
+            return False
+        try:
+            cached_time = datetime.fromisoformat(cached_at.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if cached_time.tzinfo is None:
+            cached_time = cached_time.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - cached_time).total_seconds()
+        return 0 <= age < self.cache_ttl
+
+    def prune_expired(self, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now < self.next_prune_at:
+            return
+        self.next_prune_at = now + min(60.0, self.cache_ttl)
+
+        expired = [
+            ip_address
+            for ip_address, entry in self.cache.items()
+            if not isinstance(entry, dict) or not self.cache_entry_is_fresh(entry)
+        ]
+        if not expired:
+            return
+        for ip_address in expired:
+            self.cache.pop(ip_address, None)
+        save_ipinfo_cache(self.cache_file, self.cache)
+
+    def lookup(self, ip_address: str) -> dict[str, str | None] | None:
+        self.prune_expired()
+        cached = self.cache.get(ip_address)
+        if isinstance(cached, dict):
+            return {field: cached.get(field) for field in IPINFO_FIELDS}
+        if ip_address in self.failed_ips:
+            return None
+
+        if not ipaddress.ip_address(ip_address).is_global:
+            return {field: None for field in IPINFO_FIELDS}
+
+        try:
+            endpoint = self.api_url.format(
+                ip=urllib.parse.quote(ip_address, safe=":")
+            )
+        except (KeyError, ValueError) as error:
+            raise RuntimeError(f"Invalid IPINFO_API_URL: {error}") from error
+
+        separator = "&" if "?" in endpoint else "?"
+        request_url = endpoint + separator + urllib.parse.urlencode(
+            {"token": self.token}
+        )
+        request = urllib.request.Request(
+            request_url,
+            headers={"Accept": "application/json", "User-Agent": "busted-simple-ip-trap/1"},
+        )
+
+        failure: str | None = None
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                payload = response.read(1_000_001)
+            if len(payload) > 1_000_000:
+                raise ValueError("response exceeded 1 MB")
+            data = json.loads(payload)
+            if not isinstance(data, dict) or data.get("error"):
+                raise ValueError("API returned an error or invalid object")
+        except urllib.error.HTTPError as error:
+            failure = f"HTTP status {error.code}"
+        except urllib.error.URLError as error:
+            failure = f"network error: {error.reason}"
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            failure = str(error)
+
+        if failure is not None:
+            self.failed_ips.add(ip_address)
+            print(
+                f"IPinfo lookup failed for {ip_address}: {failure}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return None
+
+        details = normalized_ipinfo(data)
+        self.cache[ip_address] = {**details, "cached_at": utc_now()}
+        save_ipinfo_cache(self.cache_file, self.cache)
+        return details
+
+    def enrich(self, record: dict[str, Any]) -> None:
+        details = self.lookup(record["ip"])
+        if details is not None:
+            record.update(details)
 
 
 @contextmanager
@@ -220,6 +393,7 @@ def process_available(
     state_file: Path,
     nonce_file: Path | None = None,
     lock_file: Path | None = None,
+    ipinfo: IPinfoEnricher | None = None,
 ) -> int:
     """Process complete lines currently available and return the new offset."""
     offset = read_offset(state_file)
@@ -248,6 +422,8 @@ def process_available(
             if record is None:
                 print(f"Skipping malformed visitor log entry: {line.rstrip()!r}")
             else:
+                if ipinfo is not None:
+                    ipinfo.enrich(record)
                 append_record(output_file, record)
                 if nonce_file is not None and lock_file is not None:
                     record_nonce_hit(
@@ -269,6 +445,15 @@ def main() -> None:
     parser.add_argument("--lock-file", type=Path, default=DEFAULT_NONCE_LOCK_FILE)
     parser.add_argument("--poll-interval", type=float, default=DEFAULT_POLL_INTERVAL)
     parser.add_argument("--nonce-length", type=int, default=DEFAULT_NONCE_LENGTH)
+    parser.add_argument("--ipinfo-token", default=DEFAULT_IPINFO_TOKEN)
+    parser.add_argument("--ipinfo-api-url", default=DEFAULT_IPINFO_API_URL)
+    parser.add_argument(
+        "--ipinfo-cache-file", type=Path, default=DEFAULT_IPINFO_CACHE_FILE
+    )
+    parser.add_argument("--ipinfo-timeout", type=float, default=DEFAULT_IPINFO_TIMEOUT)
+    parser.add_argument(
+        "--ipinfo-cache-ttl", type=float, default=DEFAULT_IPINFO_CACHE_TTL
+    )
     parser.add_argument(
         "--activate-nonce",
         action="store_true",
@@ -283,6 +468,10 @@ def main() -> None:
         parser.error("--poll-interval must be greater than zero")
     if args.nonce_length < 8:
         parser.error("--nonce-length must be at least 8")
+    if args.ipinfo_timeout <= 0:
+        parser.error("--ipinfo-timeout must be greater than zero")
+    if args.ipinfo_cache_ttl <= 0:
+        parser.error("--ipinfo-cache-ttl must be greater than zero")
 
     args.output_file.parent.mkdir(parents=True, exist_ok=True)
     args.state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -300,13 +489,26 @@ def main() -> None:
         )
         return
 
+    ipinfo = None
+    if args.ipinfo_token:
+        ipinfo = IPinfoEnricher(
+            args.ipinfo_token,
+            args.ipinfo_api_url,
+            args.ipinfo_cache_file,
+            args.ipinfo_timeout,
+            args.ipinfo_cache_ttl,
+        )
+
     while True:
+        if ipinfo is not None:
+            ipinfo.prune_expired()
         process_available(
             args.log_file,
             args.output_file,
             args.state_file,
             args.nonce_file,
             args.lock_file,
+            ipinfo,
         )
         if args.once:
             break

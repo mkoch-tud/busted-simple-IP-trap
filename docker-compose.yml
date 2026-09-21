@@ -41,10 +41,16 @@ services:
       NONCE_LOCK_FILE: /data/.nonces.lock
       NONCE_LENGTH: "${NONCE_LENGTH:-24}"
       PROCESSOR_POLL_INTERVAL: "1"
+      IPINFO_TOKEN: "${IPINFO_TOKEN:-}"
+      IPINFO_API_URL: "${IPINFO_API_URL:-https://ipinfo.io/{ip}/json}"
+      IPINFO_CACHE_FILE: /data/ipinfo_cache.json
+      IPINFO_TIMEOUT: "${IPINFO_TIMEOUT:-5}"
+      IPINFO_CACHE_TTL: "${IPINFO_CACHE_TTL:-86400}"
     depends_on:
       app:
         condition: service_healthy
-    network_mode: none
+    networks:
+      - enrichment
 
   nginx:
     build:
@@ -76,6 +82,7 @@ services:
 
 networks:
   web:
+  enrichment:
 
 volumes:
   letsencrypt_data:
