@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+exec docker compose exec -T log-processor \
+    python log_processor.py --activate-nonce "$@"

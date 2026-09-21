@@ -1,0 +1,85 @@
+name: busted-simple-ip-trap
+
+services:
+  app:
+    image: busted-simple-ip-trap-app:local
+    build:
+      context: .
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    volumes:
+      - type: bind
+        source: "${LOGFILES_DIR:-./logfiles}"
+        target: /data
+    expose:
+      - "8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz').read()"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - web
+
+  log-processor:
+    image: busted-simple-ip-trap-app:local
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    command: ["python", "log_processor.py"]
+    volumes:
+      - type: bind
+        source: "${LOGFILES_DIR:-./logfiles}"
+        target: /data
+    environment:
+      VISITOR_LOG: /data/visitors.log
+      PROCESSED_LOG: /data/processed_visitors.jsonl
+      PROCESSOR_STATE: /data/.processor.offset
+      NONCE_FILE: /data/nonces.json
+      NONCE_LOCK_FILE: /data/.nonces.lock
+      NONCE_LENGTH: "${NONCE_LENGTH:-24}"
+      PROCESSOR_POLL_INTERVAL: "1"
+    depends_on:
+      app:
+        condition: service_healthy
+    network_mode: none
+
+  nginx:
+    build:
+      context: ./nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - letsencrypt_data:/etc/letsencrypt
+      - certbot_webroot:/var/www/certbot
+      - certbot_work:/var/lib/letsencrypt
+      - certbot_logs:/var/log/letsencrypt
+    environment:
+      SERVER_DOMAIN: "${SERVER_DOMAIN:?Set SERVER_DOMAIN in .env}"
+      HTTPS_ENABLED: "true"
+      CERTBOT_EMAIL: "${CERTBOT_EMAIL:?Set CERTBOT_EMAIL in .env}"
+      CERTBOT_CA: "${CERTBOT_CA:-letsencrypt}"
+      CERTBOT_SERVER_URL: "${CERTBOT_SERVER_URL:-}"
+      CERTBOT_CERT_NAME: "${CERTBOT_CERT_NAME:-}"
+      CERTBOT_STAGING: "${CERTBOT_STAGING:-false}"
+      CERTBOT_RENEW_INTERVAL: "${CERTBOT_RENEW_INTERVAL:-43200}"
+      CERTBOT_RETRY_INTERVAL: "${CERTBOT_RETRY_INTERVAL:-300}"
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      - web
+
+networks:
+  web:
+
+volumes:
+  letsencrypt_data:
+  certbot_webroot:
+  certbot_work:
+  certbot_logs:

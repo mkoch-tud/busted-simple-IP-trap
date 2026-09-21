@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+__pycache__/
+*.log
+*.jsonl
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
+logfiles/
+README.md
+THIRD_PARTY_NOTICES.md
