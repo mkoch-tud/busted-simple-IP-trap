@@ -39,6 +39,35 @@ certificate is issued, the entrypoint validates the HTTPS configuration,
 reloads Nginx, and redirects normal HTTP requests to HTTPS. Failed certificate
 requests leave HTTP available and are retried after five minutes.
 
+### Delete a stored certificate
+
+Stop Nginx before deleting its certificate so the certificate worker cannot
+immediately issue it again:
+
+```sh
+docker compose stop nginx
+./delete-certificate
+```
+
+The helper derives the lineage from `CERTBOT_CERT_NAME`, or from
+`SERVER_DOMAIN` and `CERTBOT_CA` when no explicit name is configured. It asks
+for confirmation before running `certbot delete`. For unattended use:
+
+```sh
+./delete-certificate --yes
+```
+
+If `.env` already contains a new domain, pass the old certificate lineage
+explicitly:
+
+```sh
+./delete-certificate old.example.com
+```
+
+Restarting Nginx with the deleted domain still configured will request a new
+certificate. Change the domain configuration or leave Nginx stopped if the site
+is being retired. Deleting local files does not revoke the certificate.
+
 Each page request is appended to `/data/visitors.log` in the bind-mounted log
 directory. Any path after the domain is treated as an identifier, displayed on
 the page, and included in the same log entry. For example:

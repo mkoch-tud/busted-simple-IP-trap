@@ -1,0 +1,62 @@
+#!/bin/sh
+set -eu
+
+confirmed=false
+if [ "${1:-}" = "--yes" ]; then
+    confirmed=true
+    shift
+fi
+
+if [ "$#" -gt 1 ]; then
+    printf 'Usage: %s [--yes] [CERTIFICATE_LINEAGE]\n' "$0" >&2
+    exit 2
+fi
+
+requested_name=${1:-}
+
+if docker compose ps --status running --services | grep -qx nginx; then
+    printf '%s\n' \
+        'Refusing to delete a certificate while nginx is running.' \
+        'Run "docker compose stop nginx" first. Do not restart it with the same domain, or Certbot will issue the certificate again.' >&2
+    exit 1
+fi
+
+exec docker compose run --rm --no-deps --entrypoint /bin/sh nginx -ec '
+requested_name=$1
+confirmed=$2
+
+if [ -n "$requested_name" ]; then
+    cert_name=$requested_name
+elif [ -n "${CERTBOT_CERT_NAME:-}" ]; then
+    cert_name=$CERTBOT_CERT_NAME
+else
+    case "${CERTBOT_CA:-letsencrypt}" in
+        letsencrypt) cert_name=${SERVER_DOMAIN:-} ;;
+        tu-dresden) cert_name="${SERVER_DOMAIN:-}-tu-dresden" ;;
+        custom) cert_name="${SERVER_DOMAIN:-}-custom" ;;
+        *)
+            printf "Cannot derive certificate lineage for unsupported CERTBOT_CA=%s\n" "${CERTBOT_CA:-}" >&2
+            exit 2
+            ;;
+    esac
+fi
+
+if [ -z "$cert_name" ]; then
+    printf "Cannot determine the certificate lineage. Pass it explicitly.\n" >&2
+    exit 2
+fi
+
+if [ "$confirmed" != true ]; then
+    printf "Delete Certbot certificate lineage %s? [y/N] " "$cert_name" >&2
+    read -r answer
+    case "$answer" in
+        y|Y|yes|YES) ;;
+        *)
+            printf "Certificate deletion cancelled.\n" >&2
+            exit 1
+            ;;
+    esac
+fi
+
+exec certbot delete --cert-name "$cert_name" --non-interactive
+' delete-certificate "$requested_name" "$confirmed"
