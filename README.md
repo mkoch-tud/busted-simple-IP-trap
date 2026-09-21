@@ -2,228 +2,258 @@ Simple IP trap; yep...AI generated, I don't waste my time for malicious people.
 
 # busted-simple-IP-trap
 
-The Compose stack runs the Python app behind Nginx on ports 80 and 443. A
-separate container continuously extracts IP addresses and nonces from the raw
-visitor log, and registered nonces can be activated with one command. The custom
-Nginx image includes Certbot and automatically requests, installs, and renews a
-certificate using the HTTP-01 challenge.
+A small IP-logging page behind Nginx with automatic Certbot HTTPS, nonce-based
+tracking, optional IPinfo enrichment, and persistent visitor reports.
 
-## Public HTTPS setup
+## 1. Basic setup
 
-Requirements:
+### Requirements
 
-- A public domain with its A and/or AAAA record pointing at this host.
-- Inbound TCP ports 80 and 443 forwarded to this host and not used by another
-  service.
 - Docker with the Compose plugin.
+- A public domain whose A and/or AAAA records point to this host.
+- Inbound TCP ports 80 and 443 forwarded to this host and unused by other
+  services. Port 80 is required for the ACME HTTP-01 challenge.
 
-Create the runtime configuration and replace both example values:
+### Configure the domain, certificate, and IPinfo
+
+Create the runtime configuration:
 
 ```sh
 cp .env.example .env
 ```
 
-For a first deployment, leave `CERTBOT_STAGING=false`. If you are repeatedly
-testing certificate issuance, use `true` until the setup works to avoid Let's
-Encrypt production rate limits; staging certificates are not browser-trusted.
+Open `.env` and change at least these certificate settings:
 
-Build and start the stack:
-
-```sh
-docker compose up -d --build
-docker compose logs -f nginx
+```env
+SERVER_DOMAIN=trap.example.com
+CERTBOT_EMAIL=admin@example.com
+CERTBOT_CA=letsencrypt
+CERTBOT_STAGING=false
 ```
 
-Nginx initially serves HTTP so Certbot can complete the challenge. After the
-certificate is issued, the entrypoint validates the HTTPS configuration,
-reloads Nginx, and redirects normal HTTP requests to HTTPS. Failed certificate
-requests leave HTTP available and are retried after five minutes.
+- `SERVER_DOMAIN` must be the public DNS name for this server.
+- `CERTBOT_EMAIL` is used for the Certbot/Let's Encrypt account.
+- Leave `CERTBOT_CA=letsencrypt` and `CERTBOT_SERVER_URL=` empty for normal
+  Let's Encrypt certificates.
+- `CERTBOT_STAGING=false` issues a browser-trusted production certificate. Use
+  `true` only while troubleshooting certificate issuance; staging certificates
+  are not browser-trusted.
 
-### Delete a stored certificate
-
-Stop Nginx before deleting its certificate so the certificate worker cannot
-immediately issue it again:
-
-```sh
-docker compose stop nginx
-./delete-certificate
-```
-
-The helper derives the lineage from `CERTBOT_CERT_NAME`, or from
-`SERVER_DOMAIN` and `CERTBOT_CA` when no explicit name is configured. It asks
-for confirmation before running `certbot delete`. For unattended use:
-
-```sh
-./delete-certificate --yes
-```
-
-If `.env` already contains a new domain, pass the old certificate lineage
-explicitly:
-
-```sh
-./delete-certificate old.example.com
-```
-
-Restarting Nginx with the deleted domain still configured will request a new
-certificate. Change the domain configuration or leave Nginx stopped if the site
-is being retired. Deleting local files does not revoke the certificate.
-
-Each page request is appended to `/data/visitors.log` in the bind-mounted log
-directory. Any path after the domain is treated as an identifier, displayed on
-the page, and included in the same log entry. For example:
-
-```text
-https://trap.example.com/2347865gbkewfhbdkj
-```
-
-The query string is not part of the identifier. To view the log:
-
-```sh
-docker compose exec app sh -c 'tail -f /data/visitors.log'
-```
-
-By default, all application data is persistently stored in the host's
-`./logfiles` directory:
-
-- `visitors.log`: raw page visits.
-- `processed_visitors.jsonl`: normalized visits.
-- `nonces.json`: activated nonces, activation times, and hit counts.
-- `ipinfo_cache.json`: cached IPinfo responses when enrichment is enabled.
-- `.processor.offset`: the processor's restart position.
-
-Set `LOGFILES_DIR` in `.env` to mount a different host directory. The Python
-containers run as container root so they can write to bind mounts regardless of
-the host account's numeric UID; they have no privileged mode or host filesystem
-access beyond this directory.
-
-The `log-processor` container converts raw entries into
-`./logfiles/processed_visitors.jsonl`. Each line is an independent JSON object:
-
-```json
-{"timestamp":"2026-09-21 13:53:46,105","ip":"203.0.113.42","nonce":"2347865gbkewfhbdkj"}
-{"timestamp":"2026-09-21 13:54:02,910","ip":"203.0.113.43","nonce":null}
-```
-
-View processed entries with:
-
-```sh
-docker compose exec log-processor sh -c 'tail -f /data/processed_visitors.jsonl'
-```
-
-The processor stores its last-read position in `/data/.processor.offset`, so
-restarting the container does not normally duplicate previously processed
-entries. Existing log lines from older versions that have no identifier are
-also emitted with `"nonce": null`.
-
-### Optional IPinfo enrichment
-
-Set an IPinfo token in `.env` to enable enrichment:
+IPinfo enrichment is optional. To enable it, add your token:
 
 ```env
 IPINFO_TOKEN=your-token
 ```
 
-The processor then adds `country`, `city`, `postal`, `org`, and `timezone` to
-new processed records and caches successful lookups by IP in
-`./logfiles/ipinfo_cache.json`:
+When enabled, new processed records contain `country`, `city`, `postal`, `org`,
+and `timezone`. Successful lookups are cached for 24 hours in
+`./logfiles/ipinfo_cache.json`; expired entries are removed and looked up again
+if the IP returns. Leaving `IPINFO_TOKEN` empty disables all IPinfo requests.
 
-```json
-{"timestamp":"2026-09-21 13:53:46,105","ip":"45.83.64.1","nonce":"2347865gbkewfhbdkj","country":"DE","city":"Berlin","postal":"10119","org":"AS208843 Alpha Strike Labs GmbH","timezone":"Europe/Berlin"}
-```
-
-The default endpoint matches the `ipinfo.io/<IP>` response shape. IPinfo's
-[official Lite endpoint](https://ipinfo.io/developers/lite-api) can be selected
-instead:
+The default endpoint matches the `ipinfo.io/<IP>` response from the example in
+this project. To use IPinfo's official Lite endpoint instead, set:
 
 ```env
 IPINFO_API_URL=https://api.ipinfo.io/lite/{ip}
 ```
 
-Lite provides country and ASN/organization data but does not provide city,
-postal code, or timezone, so those fields will be `null`. Lookups are disabled
-entirely when `IPINFO_TOKEN` is empty. Failed lookups do not interrupt log
-processing and are retried after the processor restarts. Enabling this feature
-sends visitor IP addresses to IPinfo; account for that in your privacy policy.
+IPinfo Lite provides country and ASN/organization data but not city, postal
+code, or timezone, so those unavailable fields are recorded as `null`.
+Enrichment sends visitor IP addresses to IPinfo; account for this in the privacy
+rules applicable to your deployment.
 
-Cache entries expire after 24 hours (`IPINFO_CACHE_TTL=86400`) and are pruned
-periodically. A later visit from that IP triggers a new lookup, so reassigned IP
-addresses do not retain old organization or geolocation data indefinitely.
+### Start the service
 
-Restart the processor after changing these settings:
+Build and start everything:
 
 ```sh
-docker compose up -d --build --force-recreate log-processor
+docker compose up -d --build
 ```
 
-### Visitor reports
-
-Show the ten most frequently connected IPs across all page hits, regardless of
-whether they used a nonce:
+Check container state and follow certificate setup:
 
 ```sh
-./visitor-report
+docker compose ps
+docker compose logs -f nginx
 ```
 
-Show the top three IPs separately for every activated nonce:
+Nginx initially serves HTTP for the ACME challenge. After Certbot issues the
+certificate, Nginx reloads automatically and redirects normal HTTP requests to
+HTTPS. The page is then available at:
 
-```sh
-./visitor-report --require-nonce
+```text
+https://trap.example.com/
 ```
 
-Both reports include cached country, city, postal code, timezone, and
-organization details when present in the processed records.
+## 2. Activate and use a nonce
 
-## Activate and track a nonce
-
-With the stack running, activate a new nonce using the helper command:
+Generate and register a unique nonce:
 
 ```sh
 ./activate-nonce
 ```
 
-The default length is 24 alphanumeric characters. Change `NONCE_LENGTH` in
-`.env`, or override it for one activation with
-`./activate-nonce --nonce-length 32`.
-
-It prints only the generated nonce, making it easy to capture from another
-program or shell:
+The command prints only the nonce. Capture it and construct a link with your
+configured domain:
 
 ```sh
 nonce=$(./activate-nonce)
 echo "https://trap.example.com/$nonce"
 ```
 
-Generation uses cryptographically secure randomness and checks the nonce
-registry, processed visits, and raw visits before activating it. A generated
-nonce is therefore never knowingly reused. The registry resembles:
+The default nonce length is 24 alphanumeric characters. Override it for one
+activation with:
 
-```json
-{
-  "2347865gbkewfhbdkj": {
-    "activated_at": "2026-09-21T14:00:00Z",
-    "first_hit_at": "2026-09-21 16:01:05,120",
-    "hit_count": 3,
-    "last_hit_at": "2026-09-21 16:07:42,918"
-  }
-}
+```sh
+./activate-nonce --nonce-length 32
 ```
 
-Arbitrary, unregistered URL identifiers still display and appear in the
-processed visit log, but only activated nonces receive counters in
-`nonces.json`.
+Generated values are checked against the nonce registry and all raw and
+processed visits before activation. `./logfiles/nonces.json` stores each
+activation time, hit count, and first/last hit time.
 
-The app service is only reachable on the private Compose network. Nginx
-overwrites `X-Real-IP` with the connecting client's address, which is the value
-logged and displayed by the app. Treat IP addresses and logs according to the
-privacy rules applicable to your deployment.
+Arbitrary URL identifiers still open the trap page and appear in processed
+logs, but only nonces generated by `activate-nonce` receive counters in the
+nonce registry. Query strings are not included in the nonce.
 
-## Local Python run
+## 3. Check visitors and nonce hits
 
-No third-party Python packages are required:
+### Top visitors across all links
+
+Show the ten IP addresses with the most page hits, independent of whether a
+nonce was used:
+
+```sh
+./visitor-report
+```
+
+The report contains:
+
+- Total hits per IP address.
+- Country, city, and postal code when IPinfo provides them.
+- Timezone.
+- ASN and organization information.
+
+### Top visitors for every activated nonce
+
+Show the top three IP addresses and hit counts separately for every registered
+nonce:
+
+```sh
+./visitor-report --require-nonce
+```
+
+Each nonce section includes its activation time, total registered hit count,
+and the top three connecting IPs with the same geolocation and organization
+columns. Activated nonces with no visits are also shown.
+
+### Persistent files and raw logs
+
+All visitor data is stored in the host's `./logfiles` directory by default:
+
+- `visitors.log`: raw timestamp, IP, and identifier entries.
+- `processed_visitors.jsonl`: normalized visits and optional IPinfo fields.
+- `nonces.json`: activated nonces and hit counters.
+- `ipinfo_cache.json`: cached IPinfo results.
+- `.processor.offset`: processor restart position.
+
+Change `LOGFILES_DIR` in `.env` to use another host directory. View the raw and
+processed streams directly with:
+
+```sh
+docker compose exec app sh -c 'tail -f /data/visitors.log'
+docker compose exec log-processor sh -c 'tail -f /data/processed_visitors.jsonl'
+```
+
+A processed entry with enrichment resembles:
+
+```json
+{"timestamp":"2026-09-21 13:53:46,105","ip":"45.83.64.1","nonce":"2347865gbkewfhbdkj","country":"DE","city":"Berlin","postal":"10119","org":"AS208843 Alpha Strike Labs GmbH","timezone":"Europe/Berlin"}
+```
+
+## 4. Decommission the deployment
+
+“Decommission” is the usual term for intentionally taking the service out of
+operation and cleaning up its resources.
+
+### Temporarily stop it
+
+Stop the containers while preserving certificates, logs, and nonce data:
+
+```sh
+docker compose down
+```
+
+Running `docker compose up -d` later reuses the stored certificate if it is
+still valid.
+
+### Delete the certificate lineage
+
+Stop Nginx first so its certificate worker cannot immediately issue the same
+certificate again:
+
+```sh
+docker compose stop nginx
+./delete-certificate
+```
+
+The helper derives the lineage from `.env` and asks for confirmation. For
+unattended deletion:
+
+```sh
+./delete-certificate --yes
+```
+
+If `.env` already contains a different domain, provide the old lineage:
+
+```sh
+./delete-certificate old.example.com
+```
+
+Deleting a local certificate is not the same as revoking it. Revoke separately
+only if its private key was exposed or the certificate is otherwise unsafe.
+Restarting Nginx with the deleted domain still configured will request a new
+certificate.
+
+### Completely remove deployment data
+
+After deleting the certificate, remove the containers, networks, and remaining
+Certbot volumes:
+
+```sh
+docker compose down --volumes --remove-orphans
+```
+
+Docker does not remove the bind-mounted visitor files. To delete the generated
+logs, nonce registry, processor state, and IPinfo cache while keeping the
+tracked `logfiles` directory itself:
+
+```sh
+rm -f ./logfiles/visitors.log \
+      ./logfiles/processed_visitors.jsonl \
+      ./logfiles/nonces.json \
+      ./logfiles/ipinfo_cache.json \
+      ./logfiles/.processor.offset \
+      ./logfiles/.nonces.lock
+```
+
+Finally, remove the local runtime configuration if it is no longer needed:
+
+```sh
+rm -f .env
+```
+
+These removal commands are destructive. Back up `./logfiles` first if the
+visitor history or nonce statistics must be retained.
+
+## Local development without Docker
+
+The page server itself requires only Python 3:
 
 ```sh
 python3 server.py
 ```
 
 Then open <http://localhost:8000>. Use `--port` or `--log-file` to override the
-defaults.
+defaults. HTTPS, certificate management, automatic processing, and helper
+scripts require the Docker Compose stack.
