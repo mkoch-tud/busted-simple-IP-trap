@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import sys
 from collections import Counter, defaultdict
@@ -15,6 +14,16 @@ from typing import Any, Iterable
 DEFAULT_LOG_FILE = Path("/data/processed_visitors.jsonl")
 DEFAULT_NONCE_FILE = Path("/data/nonces.json")
 DETAIL_FIELDS = ("country", "city", "postal", "timezone", "org")
+TABLE_HEADERS = (
+    "HITS",
+    "IP ADDRESS",
+    "COUNTRY",
+    "CITY",
+    "POSTAL",
+    "TIMEZONE",
+    "ORGANIZATION",
+)
+MINIMUM_WIDTHS = (8, 39, 12, 20, 10, 24, 12)
 
 
 def read_records(log_file: Path) -> Iterable[dict[str, Any]]:
@@ -63,15 +72,15 @@ def update_details(
 def write_ranking(
     counts: Counter[str], details_by_ip: dict[str, dict[str, str]], limit: int
 ) -> None:
-    writer = csv.writer(sys.stdout, delimiter="\t", lineterminator="\n")
-    writer.writerow(("HITS", "IP", "COUNTRY", "CITY", "POSTAL", "TIMEZONE", "ORG"))
-    for ip_address, hits in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[
-        :limit
-    ]:
+    ranked_visitors = sorted(
+        counts.items(), key=lambda item: (-item[1], item[0])
+    )[:limit]
+    rows: list[tuple[str, ...]] = []
+    for ip_address, hits in ranked_visitors:
         details = details_by_ip.get(ip_address, {})
-        writer.writerow(
+        rows.append(
             (
-                hits,
+                str(hits),
                 ip_address,
                 details.get("country", "-"),
                 details.get("city", "-"),
@@ -81,6 +90,30 @@ def write_ranking(
             )
         )
 
+    sanitized_rows = [
+        tuple(" ".join(value.split()) or "-" for value in row) for row in rows
+    ]
+    widths = [
+        max(
+            MINIMUM_WIDTHS[column],
+            len(TABLE_HEADERS[column]),
+            *(len(row[column]) for row in sanitized_rows),
+        )
+        for column in range(len(TABLE_HEADERS))
+    ]
+
+    def formatted(row: tuple[str, ...]) -> str:
+        columns = [f"{row[0]:>{widths[0]}}"]
+        columns.extend(
+            f"{value:<{widths[index]}}" for index, value in enumerate(row[1:], 1)
+        )
+        return "  ".join(columns).rstrip()
+
+    print(formatted(TABLE_HEADERS))
+    print("  ".join("-" * width for width in widths))
+    for row in sanitized_rows:
+        print(formatted(row))
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -89,9 +122,23 @@ def main() -> None:
     parser.add_argument(
         "--require-nonce",
         action="store_true",
-        help="show the top three IPs separately for every activated nonce",
+        help="show top IPs separately for every activated nonce",
+    )
+    parser.add_argument(
+        "-n",
+        "--limit",
+        type=int,
+        help="number of IPs to show (default: 10 globally, 3 per nonce)",
     )
     args = parser.parse_args()
+
+    if args.limit is not None and args.limit <= 0:
+        parser.error("-n/--limit must be greater than zero")
+    limit = (
+        args.limit
+        if args.limit is not None
+        else (3 if args.require_nonce else 10)
+    )
 
     nonce_registry = read_nonces(args.nonce_file) if args.require_nonce else {}
     active_nonces = set(nonce_registry)
@@ -109,8 +156,8 @@ def main() -> None:
             nonce_counts[nonce][ip_address] += 1
 
     if not args.require_nonce:
-        print("Top 10 connected IPs (all page hits)")
-        write_ranking(all_counts, details_by_ip, 10)
+        print(f"Top {limit} connected IPs (all page hits)")
+        write_ranking(all_counts, details_by_ip, limit)
         return
 
     if not nonce_registry:
@@ -129,7 +176,7 @@ def main() -> None:
             f"Nonce: {nonce} | activated: {metadata.get('activated_at', '-')} "
             f"| registered hits: {metadata.get('hit_count', 0)}"
         )
-        write_ranking(nonce_counts[nonce], details_by_ip, 3)
+        write_ranking(nonce_counts[nonce], details_by_ip, limit)
 
 
 if __name__ == "__main__":

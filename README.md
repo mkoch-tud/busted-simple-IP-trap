@@ -127,6 +127,12 @@ nonce was used:
 ./visitor-report
 ```
 
+Choose a different number with `-n`:
+
+```sh
+./visitor-report -n 25
+```
+
 The report contains:
 
 - Total hits per IP address.
@@ -143,9 +149,19 @@ nonce:
 ./visitor-report --require-nonce
 ```
 
+The nonce report defaults to three IPs per nonce. Override it in the same way:
+
+```sh
+./visitor-report --require-nonce -n 5
+```
+
 Each nonce section includes its activation time, total registered hit count,
-and the top three connecting IPs with the same geolocation and organization
+and the selected connecting IPs with the same geolocation and organization
 columns. Activated nonces with no visits are also shown.
+
+All rankings are ordered by request count from highest to lowest, then
+lexicographically by IP address when counts are equal. This makes repeated
+reports stable.
 
 ### Persistent files and raw logs
 
